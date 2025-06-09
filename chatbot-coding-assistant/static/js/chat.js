@@ -1,25 +1,49 @@
 /* ================================================= */
-/* static/js/chat.js (completo y final)      */
+/* static/js/chat.js (Con efecto máquina de escribir) */
 /* ================================================= */
 
 document.addEventListener('DOMContentLoaded', () => {
+    // --- 1. CONFIGURACIÓN ---
+    // Cambia este valor para ajustar la velocidad. Menor = más rápido. (Ej: 50 es lento, 10 es muy rápido)
+    const TYPEWRITER_SPEED = 1;
+
+    // --- Referencias a elementos del DOM ---
     const chatWindow = document.getElementById('chat-window');
     const chatForm = document.getElementById('chat-form');
     const messageInput = document.getElementById('message-input');
     const sendButton = document.getElementById('send-button');
 
+    // --- 2. NUEVA FUNCIÓN DE MÁQUINA DE ESCRIBIR ---
     /**
-     * Hace scroll hasta el final de la ventana del chat.
+     * Escribe texto en un elemento carácter por carácter.
+     * @param {string} text - El texto a escribir.
+     * @param {HTMLElement} element - El elemento donde se escribirá el texto.
+     * @returns {Promise<void>} Una promesa que se resuelve cuando el texto ha terminado de escribirse.
      */
+    const typewriterEffect = (text, element) => {
+        return new Promise(resolve => {
+            let i = 0;
+            element.innerHTML = ""; // Limpia el contenido previo
+
+            function type() {
+                if (i < text.length) {
+                    element.innerHTML += text.charAt(i);
+                    i++;
+                    scrollToBottom(); // Asegura que la ventana se desplace mientras escribe
+                    setTimeout(type, TYPEWRITER_SPEED);
+                } else {
+                    resolve(); // Resuelve la promesa al finalizar
+                }
+            }
+            type();
+        });
+    };
+
+    // --- Funciones de la Interfaz ---
     const scrollToBottom = () => {
         chatWindow.scrollTop = chatWindow.scrollHeight;
     };
-    
-    /**
-     * Crea la estructura de un mensaje del bot con su icono.
-     * @param {HTMLElement} messageElement - El div principal del mensaje del bot.
-     * @returns {HTMLElement} El elemento <code> donde se escribirá el texto.
-     */
+
     const createBotMessageStructure = (messageElement) => {
         const icon = document.createElement('span');
         icon.classList.add('bot-icon');
@@ -35,36 +59,33 @@ document.addEventListener('DOMContentLoaded', () => {
         contentDiv.appendChild(codeBlock);
         messageElement.appendChild(contentDiv);
 
-        return codeElement; // Devolvemos el elemento 'code' para llenarlo
+        return codeElement;
     };
-
+    
+    // --- 3. LÓGICA DE MANEJO DE RESPUESTAS (ACTUALIZADA) ---
     /**
-     * Procesa la respuesta en streaming del servidor.
-     * @param {Response} response - El objeto de respuesta del fetch.
-     * @param {HTMLElement} botCodeElement - El elemento <code> del mensaje del bot.
+     * Procesa la respuesta en streaming, acumula el texto y luego lo escribe.
      */
     const handleStreamedResponse = async (response, botCodeElement) => {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let fullText = ''; // Acumula el texto completo aquí
 
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
 
             buffer += decoder.decode(value, { stream: true });
-            
-            // Procesa los Server-Sent Events (SSE) que llegan.
             const parts = buffer.split('\n\n');
-            buffer = parts.pop(); // Lo que quede es parte del siguiente mensaje
+            buffer = parts.pop();
 
             for (const part of parts) {
                 if (part.startsWith('data:')) {
                     try {
                         const data = JSON.parse(part.substring(5));
                         if (data.text) {
-                            botCodeElement.innerHTML += data.text; // innerHTML para renderizar markdown simple como negritas
-                            scrollToBottom();
+                            fullText += data.text;
                         }
                     } catch (e) {
                         console.error('Error al parsear JSON del stream:', e);
@@ -72,6 +93,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         }
+        // Cuando el stream termina, llama al efecto de máquina de escribir
+        await typewriterEffect(fullText, botCodeElement);
     };
 
     /**
@@ -82,10 +105,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const message = messageInput.value.trim();
         if (!message) return;
 
-        // 1. Añade el mensaje del usuario a la interfaz.
         const userMessageElement = document.createElement('div');
         userMessageElement.classList.add('message', 'user-message');
-        // El mensaje del usuario no necesita el icono, solo el contenedor de contenido.
         const userContent = document.createElement('div');
         userContent.classList.add('message-content');
         const p = document.createElement('p');
@@ -94,20 +115,17 @@ document.addEventListener('DOMContentLoaded', () => {
         userMessageElement.appendChild(userContent);
         chatWindow.appendChild(userMessageElement);
         
-        // 2. Limpia el input y deshabilita el botón de envío.
         messageInput.value = '';
-        messageInput.style.height = '50px'; // Resetea la altura del textarea
+        messageInput.style.height = '50px';
         sendButton.disabled = true;
         scrollToBottom();
 
-        // 3. Crea el elemento para la respuesta del bot y lo añade a la interfaz.
         const botMessageElement = document.createElement('div');
         botMessageElement.classList.add('message', 'bot-message');
         const botCodeElement = createBotMessageStructure(botMessageElement);
         chatWindow.appendChild(botMessageElement);
         scrollToBottom();
 
-        // 4. Realiza la llamada al servidor.
         try {
             const response = await fetch('/chat', {
                 method: 'POST',
@@ -115,41 +133,33 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify({ message: message })
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
             const contentType = response.headers.get('content-type');
             if (contentType && contentType.includes('text/event-stream')) {
-                // Procesa la respuesta en streaming de Gemini
+                // Procesa la respuesta en streaming (Gemini/LLM)
                 await handleStreamedResponse(response, botCodeElement);
             } else {
-                // Procesa la respuesta completa de Databricks o un error
+                // Procesa la respuesta completa (Databricks o error)
                 const data = await response.json();
-                botCodeElement.innerHTML = data.reply || `<strong>Error:</strong> ${data.error || 'Respuesta desconocida del servidor.'}`;
+                const reply = data.reply || `<strong>Error:</strong> ${data.error || 'Respuesta desconocida.'}`;
+                await typewriterEffect(reply, botCodeElement);
             }
 
         } catch (error) {
             console.error('Error al enviar mensaje:', error);
-            botCodeElement.innerHTML = '<strong>Error:</strong> No se pudo conectar con el servidor. Por favor, intenta de nuevo.';
+            await typewriterEffect('<strong>Error:</strong> No se pudo conectar con el servidor.', botCodeElement);
         } finally {
-            // 5. Rehabilita el botón de envío.
             sendButton.disabled = false;
         }
     });
     
-    /**
-     * Ajusta la altura del textarea dinámicamente.
-     */
     messageInput.addEventListener('input', () => {
         messageInput.style.height = 'auto';
         messageInput.style.height = (messageInput.scrollHeight) + 'px';
     });
-
-    /**
-     * Actualiza los indicadores visuales del estado de las APIs.
-     * @param {object} status - El objeto de estado de la API.
-     */
+    
+    // --- Funciones de Estado de API (sin cambios) ---
     const updateApiStatus = (status) => {
         const geminiStatus = document.getElementById('gemini-status');
         const databricksStatus = document.getElementById('databricks-status');
@@ -158,15 +168,12 @@ document.addEventListener('DOMContentLoaded', () => {
         databricksStatus.className = 'fas fa-circle status-light';
 
         geminiStatus.classList.add(status.gemini === 'available' ? 'available' : 'limited');
-        geminiStatus.title = status.gemini === 'available' ? 'Gemini: Disponible' : 'Gemini: Límite alcanzado o no disponible';
+        geminiStatus.title = status.gemini === 'available' ? 'LLM: Disponible' : 'LLM: Límite alcanzado o no disponible';
 
         databricksStatus.classList.add(status.databricks === 'available' ? 'available' : 'unavailable');
         databricksStatus.title = status.databricks === 'available' ? 'Databricks: Disponible' : 'Databricks: No disponible';
     };
 
-    /**
-     * Llama al endpoint de estado y actualiza la interfaz.
-     */
     const checkApiStatus = async () => {
         try {
             const response = await fetch('/api/status');
@@ -179,8 +186,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    // --- Ejecución Inicial ---
-    // Verifica el estado al cargar la página y luego periódicamente.
     checkApiStatus();
-    setInterval(checkApiStatus, 30000); // Chequea cada 30 segundos.
+    setInterval(checkApiStatus, 30000);
 });
