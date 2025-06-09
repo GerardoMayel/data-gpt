@@ -1,51 +1,49 @@
+/* ================================================= */
+/* static/js/chat.js (completo y final)      */
+/* ================================================= */
+
 document.addEventListener('DOMContentLoaded', () => {
     const chatWindow = document.getElementById('chat-window');
     const chatForm = document.getElementById('chat-form');
     const messageInput = document.getElementById('message-input');
     const sendButton = document.getElementById('send-button');
 
-    // --- Funciones del Chat ---
-
-    const addMessage = (message, sender) => {
-        const messageElement = document.createElement('div');
-        messageElement.classList.add('message', `${sender}-message`);
-        
-        // Usamos <pre> y <code> para respuestas de bot para preservar formato de código
-        if (sender === 'bot') {
-            const codeBlock = document.createElement('pre');
-            const codeElement = document.createElement('code');
-            codeElement.innerHTML = message; // innerHTML para renderizar el formato del markdown
-            codeBlock.appendChild(codeElement);
-            messageElement.appendChild(codeBlock);
-        } else {
-            const p = document.createElement('p');
-            p.textContent = message;
-            messageElement.appendChild(p);
-        }
-        
-        chatWindow.appendChild(messageElement);
-        scrollToBottom();
-        return messageElement;
-    };
-
+    /**
+     * Hace scroll hasta el final de la ventana del chat.
+     */
     const scrollToBottom = () => {
         chatWindow.scrollTop = chatWindow.scrollHeight;
     };
     
-    // --- Lógica para el efecto de "escritura" ---
-    
-    const createBotMessageElement = () => {
-        const messageElement = document.createElement('div');
-        messageElement.classList.add('message', 'bot-message');
+    /**
+     * Crea la estructura de un mensaje del bot con su icono.
+     * @param {HTMLElement} messageElement - El div principal del mensaje del bot.
+     * @returns {HTMLElement} El elemento <code> donde se escribirá el texto.
+     */
+    const createBotMessageStructure = (messageElement) => {
+        const icon = document.createElement('span');
+        icon.classList.add('bot-icon');
+        icon.textContent = '🤖';
+        messageElement.appendChild(icon);
+
+        const contentDiv = document.createElement('div');
+        contentDiv.classList.add('message-content');
+        
         const codeBlock = document.createElement('pre');
         const codeElement = document.createElement('code');
         codeBlock.appendChild(codeElement);
-        messageElement.appendChild(codeBlock);
-        chatWindow.appendChild(messageElement);
-        return codeElement;
+        contentDiv.appendChild(codeBlock);
+        messageElement.appendChild(contentDiv);
+
+        return codeElement; // Devolvemos el elemento 'code' para llenarlo
     };
 
-    const handleStreamedResponse = async (response, botMessageElement) => {
+    /**
+     * Procesa la respuesta en streaming del servidor.
+     * @param {Response} response - El objeto de respuesta del fetch.
+     * @param {HTMLElement} botCodeElement - El elemento <code> del mensaje del bot.
+     */
+    const handleStreamedResponse = async (response, botCodeElement) => {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -56,7 +54,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             buffer += decoder.decode(value, { stream: true });
             
-            // Procesar Server-Sent Events (SSE)
+            // Procesa los Server-Sent Events (SSE) que llegan.
             const parts = buffer.split('\n\n');
             buffer = parts.pop(); // Lo que quede es parte del siguiente mensaje
 
@@ -65,7 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     try {
                         const data = JSON.parse(part.substring(5));
                         if (data.text) {
-                            botMessageElement.innerHTML += data.text;
+                            botCodeElement.innerHTML += data.text; // innerHTML para renderizar markdown simple como negritas
                             scrollToBottom();
                         }
                     } catch (e) {
@@ -76,22 +74,40 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-
-    // --- Manejo del Formulario y Envío ---
-
+    /**
+     * Maneja el envío del formulario de chat.
+     */
     chatForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const message = messageInput.value.trim();
         if (!message) return;
 
-        addMessage(message, 'user');
+        // 1. Añade el mensaje del usuario a la interfaz.
+        const userMessageElement = document.createElement('div');
+        userMessageElement.classList.add('message', 'user-message');
+        // El mensaje del usuario no necesita el icono, solo el contenedor de contenido.
+        const userContent = document.createElement('div');
+        userContent.classList.add('message-content');
+        const p = document.createElement('p');
+        p.textContent = message;
+        userContent.appendChild(p);
+        userMessageElement.appendChild(userContent);
+        chatWindow.appendChild(userMessageElement);
+        
+        // 2. Limpia el input y deshabilita el botón de envío.
         messageInput.value = '';
-        messageInput.style.height = '50px'; // Reset height
+        messageInput.style.height = '50px'; // Resetea la altura del textarea
         sendButton.disabled = true;
+        scrollToBottom();
 
-        // Crear el elemento para la respuesta del bot que se llenará gradualmente
-        const botMessageElement = createBotMessageElement();
+        // 3. Crea el elemento para la respuesta del bot y lo añade a la interfaz.
+        const botMessageElement = document.createElement('div');
+        botMessageElement.classList.add('message', 'bot-message');
+        const botCodeElement = createBotMessageStructure(botMessageElement);
+        chatWindow.appendChild(botMessageElement);
+        scrollToBottom();
 
+        // 4. Realiza la llamada al servidor.
         try {
             const response = await fetch('/chat', {
                 method: 'POST',
@@ -103,79 +119,68 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
 
-            // Detectar si la respuesta es un stream (Gemini) o un JSON (Databricks/Error)
             const contentType = response.headers.get('content-type');
             if (contentType && contentType.includes('text/event-stream')) {
-                // Es un stream de Gemini
-                await handleStreamedResponse(response, botMessageElement);
+                // Procesa la respuesta en streaming de Gemini
+                await handleStreamedResponse(response, botCodeElement);
             } else {
-                // Es una respuesta completa de Databricks o un error
+                // Procesa la respuesta completa de Databricks o un error
                 const data = await response.json();
-                if(data.reply) {
-                    botMessageElement.innerHTML = data.reply;
-                } else {
-                    botMessageElement.innerHTML = `<strong>Error:</strong> ${data.error || 'Respuesta desconocida del servidor.'}`;
-                }
+                botCodeElement.innerHTML = data.reply || `<strong>Error:</strong> ${data.error || 'Respuesta desconocida del servidor.'}`;
             }
 
         } catch (error) {
             console.error('Error al enviar mensaje:', error);
-            botMessageElement.innerHTML = '<strong>Error:</strong> No se pudo conectar con el servidor. Por favor, intenta de nuevo.';
+            botCodeElement.innerHTML = '<strong>Error:</strong> No se pudo conectar con el servidor. Por favor, intenta de nuevo.';
         } finally {
+            // 5. Rehabilita el botón de envío.
             sendButton.disabled = false;
-            scrollToBottom();
         }
     });
     
-    // Auto-ajustar altura del textarea
+    /**
+     * Ajusta la altura del textarea dinámicamente.
+     */
     messageInput.addEventListener('input', () => {
         messageInput.style.height = 'auto';
         messageInput.style.height = (messageInput.scrollHeight) + 'px';
     });
 
-
-    // --- Monitoreo de Estado de APIs ---
-
+    /**
+     * Actualiza los indicadores visuales del estado de las APIs.
+     * @param {object} status - El objeto de estado de la API.
+     */
     const updateApiStatus = (status) => {
         const geminiStatus = document.getElementById('gemini-status');
         const databricksStatus = document.getElementById('databricks-status');
 
-        // Reset classes
         geminiStatus.className = 'fas fa-circle status-light';
         databricksStatus.className = 'fas fa-circle status-light';
 
-        // Set Gemini status color
-        if (status.gemini === 'available') {
-            geminiStatus.classList.add('available');
-            geminiStatus.title = 'Gemini: Disponible';
-        } else {
-            geminiStatus.classList.add('limited');
-            geminiStatus.title = 'Gemini: Límite alcanzado o no disponible';
-        }
+        geminiStatus.classList.add(status.gemini === 'available' ? 'available' : 'limited');
+        geminiStatus.title = status.gemini === 'available' ? 'Gemini: Disponible' : 'Gemini: Límite alcanzado o no disponible';
 
-        // Set Databricks status color
-        if (status.databricks === 'available') {
-            databricksStatus.classList.add('available');
-            databricksStatus.title = 'Databricks: Disponible';
-        } else {
-            databricksStatus.classList.add('unavailable');
-            databricksStatus.title = 'Databricks: No disponible';
-        }
+        databricksStatus.classList.add(status.databricks === 'available' ? 'available' : 'unavailable');
+        databricksStatus.title = status.databricks === 'available' ? 'Databricks: Disponible' : 'Databricks: No disponible';
     };
 
+    /**
+     * Llama al endpoint de estado y actualiza la interfaz.
+     */
     const checkApiStatus = async () => {
         try {
             const response = await fetch('/api/status');
+            if (!response.ok) throw new Error('Respuesta no exitosa del servidor de estado');
             const status = await response.json();
             updateApiStatus(status);
         } catch (error) {
             console.error('No se pudo obtener el estado de las APIs:', error);
-            // Marcar ambos como no disponibles si falla la llamada de estado
             updateApiStatus({ gemini: 'unavailable', databricks: 'unavailable' });
         }
     };
 
-    // Verificar el estado al cargar y luego cada 30 segundos
+    // --- Ejecución Inicial ---
+    // Verifica el estado al cargar la página y luego periódicamente.
     checkApiStatus();
-    setInterval(checkApiStatus, 30000);
+    setInterval(checkApiStatus, 30000); // Chequea cada 30 segundos.
 });

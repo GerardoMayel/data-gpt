@@ -5,7 +5,6 @@ import json
 from google.api_core.exceptions import ResourceExhausted
 
 # --- Configuración de APIs desde el archivo .env ---
-# Esta configuración se hace una sola vez al cargar el módulo.
 try:
     genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 except Exception as e:
@@ -14,15 +13,28 @@ except Exception as e:
 DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN")
 DATABRICKS_ENDPOINT_URL = os.getenv("DATABRICKS_ENDPOINT_URL")
 
+# --- Prompt de Sistema Centralizado ---
+# Define las reglas que ambos modelos deben seguir.
+SYSTEM_PROMPT = """You are an expert coding assistant. Follow these rules strictly:
+1. **Code Formatting:** Always wrap any code block in Markdown triple backticks. Specify the language, for example:
+   ```sql
+   SELECT * FROM my_table;
+   ```
+2. **Database Priority:** When asked for database code, use the following priority:
+   - 1st: Databricks SQL Warehouse
+   - 2nd: Oracle 12c
+   - 3rd: Microsoft SQL Server
+3. **Databricks Context:** Assume you are in a modern Databricks environment where the SparkSession is created automatically and is available globally as the 'spark' variable. Do not write code to create it.
+"""
+
 class ModelManager:
     """
     Gestiona la selección de modelos (Gemini o Databricks) y maneja el estado de disponibilidad.
     """
     def __init__(self):
-        self.gemini_available = True  # Asumimos que Gemini está disponible al inicio.
-        self.databricks_ping_ok = False # Estado del ping a Databricks, se actualiza periódicamente.
+        self.gemini_available = True
+        self.databricks_ping_ok = False
         print("ModelManager inicializado.")
-        # Hacemos un chequeo inicial al arrancar la app.
         self.check_api_status() 
 
     def get_active_model(self):
@@ -36,8 +48,7 @@ class ModelManager:
 
     def generate_chat_response(self, chat_history):
         """
-        Genera una respuesta usando el modelo activo.
-        Maneja el streaming para Gemini y la llamada estándar para Databricks.
+        Genera una respuesta usando el modelo activo, inyectando el prompt del sistema.
         """
         model_to_use = self.get_active_model()
         print(f"Intentando generar respuesta con: {model_to_use}")
@@ -45,6 +56,7 @@ class ModelManager:
         if model_to_use == 'gemini':
             try:
                 model = genai.GenerativeModel('gemini-1.5-flash')
+                # Inyectamos el prompt del sistema en el historial para Gemini
                 gemini_history = self._adapt_history_for_gemini(chat_history)
                 response_stream = model.generate_content(gemini_history, stream=True)
                 return response_stream
@@ -59,14 +71,13 @@ class ModelManager:
 
         elif model_to_use == 'databricks':
             try:
+                # El historial para Databricks se adapta con el prompt del sistema dentro de la función.
                 response_text = self._call_databricks_model(chat_history)
-                # Simulamos un stream (devolviendo una lista) para que el frontend lo maneje igual.
                 return [response_text]
             except Exception as e:
                 print(f"Error con la API de Databricks: {e}")
                 return ["Lo siento, el servicio de respaldo de Databricks tampoco está disponible en este momento."]
         else:
-            # Ningún modelo está disponible.
             return ["Lo siento, el servicio de chat no está disponible. Por favor, verifica el estado de las APIs e inténtalo más tarde."]
 
     def _call_databricks_model(self, chat_history):
@@ -79,12 +90,13 @@ class ModelManager:
             'Content-Type': 'application/json'
         }
         
+        # Esta función ahora añade el SYSTEM_PROMPT detallado.
         messages = self._adapt_history_for_databricks(chat_history)
 
         payload = {
             "messages": messages,
             "temperature": 0.7,
-            "max_tokens": 2048
+            "max_tokens": 4096 # Aumentado para respuestas de código más largas
         }
 
         response = requests.post(DATABRICKS_ENDPOINT_URL, headers=headers, json=payload, timeout=90)
@@ -96,23 +108,31 @@ class ModelManager:
         raise ValueError(f"Respuesta inesperada de la API de Databricks: {response_data}")
 
     def _adapt_history_for_gemini(self, history):
-        """Ajusta el historial para el formato de Gemini (rol 'model' en lugar de 'assistant')."""
-        return [{'role': 'model' if item['role'] == 'assistant' else 'user', 'parts': [item['content']]} for item in history]
+        """
+        Prepara el historial para Gemini, inyectando el prompt del sistema al principio
+        para darle contexto al modelo en cada turno.
+        """
+        # Formato: [Instrucción de Sistema (como user), Respuesta afirmativa (como model), ...historial real]
+        adapted_history = [
+            {'role': 'user', 'parts': [SYSTEM_PROMPT]},
+            {'role': 'model', 'parts': ["OK, I will follow these instructions."]}
+        ]
+        # Añade el resto del historial, convirtiendo 'assistant' a 'model'.
+        adapted_history.extend([{'role': 'model' if item['role'] == 'assistant' else 'user', 'parts': [item['content']]} for item in history])
+        return adapted_history
     
     def _adapt_history_for_databricks(self, history):
-        """Ajusta el historial para el formato de Databricks (puede incluir 'system')."""
-        adapted_history = []
-        if not any(item['role'] == 'system' for item in history):
-             adapted_history.append({
-                 "role": "system", 
-                 "content": "You are a helpful coding assistant. Provide clear, concise, and correct code and explanations."
-             })
+        """
+        Prepara el historial para Databricks, usando un rol 'system' explícito.
+        """
+        # El primer mensaje es el rol del sistema con nuestras reglas.
+        adapted_history = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # Añade el resto de la conversación (usuario y asistente).
         adapted_history.extend(history)
         return adapted_history
 
     def check_api_status(self):
         """Verifica la disponibilidad de las APIs de forma ligera."""
-        # Verificar Gemini
         try:
             genai.list_models()
             if not self.gemini_available:
@@ -123,7 +143,6 @@ class ModelManager:
         except Exception:
             self.gemini_available = False
 
-        # Verificar Databricks
         self.databricks_ping_ok = False
         if DATABRICKS_TOKEN and DATABRICKS_ENDPOINT_URL:
             try:
@@ -131,7 +150,7 @@ class ModelManager:
                 if response.status_code in [200, 204]:
                     self.databricks_ping_ok = True
             except requests.exceptions.RequestException:
-                pass # Si falla el ping, databricks_ping_ok se queda en False
+                pass
         
         status = {
             "gemini": "available" if self.gemini_available else "limited",
@@ -140,4 +159,3 @@ class ModelManager:
         }
         print(f"Estado de APIs actualizado: {status}")
         return status
-
